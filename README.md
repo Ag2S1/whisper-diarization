@@ -45,16 +45,9 @@ This repository combines Whisper ASR capabilities with Voice Activity Detection 
 
 Whisper and NeMo parameters are coded into diarize.py and helpers.py, I will add the CLI arguments to change them later
 ## Installation
-Python >= `3.10` is needed, `3.9` will work but you'll need to manually install the requirements one by one.
+Python `3.10` to `3.12` is recommended.
 
-`FFMPEG` and `Cython` are needed as prerequisites to install the requirements
-```
-pip install cython
-```
-or
-```
-sudo apt update && sudo apt install cython3
-```
+`FFMPEG` is required as a system dependency:
 ```
 # on Ubuntu or Debian
 sudo apt update && sudo apt install ffmpeg
@@ -74,16 +67,37 @@ scoop install ffmpeg
 # on Windows using WinGet (https://github.com/microsoft/winget-cli)
 winget install ffmpeg
 ```
+
+Install the project with `uv`:
 ```
-pip install -c constraints.txt -r requirements.txt
+uv sync -p python3.10
+```
+
+If model downloads hang or fail on Hugging Face in your environment, retry with:
+```
+HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0 uv sync -p python3.10
 ```
 ## Usage 
 
 ```
-python diarize.py -a AUDIO_FILE_NAME
+uv run -p python3.10 python diarize.py -a AUDIO_FILE_NAME
 ```
 
 If your system has enough VRAM (>=10GB), you can use `diarize_parallel.py` instead, the difference is that it runs NeMo in parallel with Whisper, this can be beneficial in some cases and the result is the same since the two models are nondependent on each other. This is still experimental, so expect errors and sharp edges. Your feedback is welcome.
+
+Example test run on CPU:
+```
+HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0 \
+uv run -p python3.10 python diarize.py -a ./tests/assets/test.opus --whisper-model tiny.en --diarizer msdd --no-stem --device cpu
+```
+
+Example test run on Apple Silicon with MPS:
+```
+HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0 \
+uv run -p python3.10 python diarize.py -a ./tests/assets/test.opus --whisper-model tiny.en --diarizer msdd --no-stem --device mps
+```
+
+When `--device mps` is used, MPS-capable stages run on `mps`, while Faster Whisper continues to run on CPU.
 
 ## Command Line Options
 
@@ -91,7 +105,7 @@ If your system has enough VRAM (>=10GB), you can use `diarize_parallel.py` inste
 - `--no-stem`: Disables source separation
 - `--whisper-model`: The model to be used for ASR, default is `medium.en`
 - `--suppress_numerals`: Transcribes numbers in their pronounced letters instead of digits, improves alignment accuracy
-- `--device`: Choose which device to use, defaults to "cuda" if available
+- `--device`: Choose `cpu`, `cuda`, or `mps`; defaults to `cuda` if available, otherwise `cpu`
 - `--language`: Manually select language, useful if language detection failed
 - `--batch-size`: Batch size for batched inference, reduce if you run out of memory, set to 0 for non-batched inference
 

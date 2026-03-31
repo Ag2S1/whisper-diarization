@@ -6,14 +6,62 @@ import wave
 from typing import Union
 
 import torch
+import torch.nn.functional as F
 
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
+from nemo.collections.asr.modules.msdd_diarizer import MSDD_module
 from nemo.collections.asr.parts.utils.speaker_utils import rttm_to_labels
 from omegaconf import OmegaConf
 
 
+def patch_msdd_module_for_mps():
+    if getattr(MSDD_module, "_whisper_diarization_mps_patch", False):
+        return
+
+    def cosine_similarity(self, scale_weights, ms_avg_embs, _ms_emb_seq):
+        cos_dist_seq = self.cos_dist(_ms_emb_seq, ms_avg_embs)
+        context_vectors = torch.mul(scale_weights, cos_dist_seq)
+        context_vectors = context_vectors.reshape(self.batch_size, self.length, -1)
+        context_emb = self.dist_to_emb(context_vectors)
+        return context_emb
+
+    def conv_scale_weights(self, ms_avg_embs_perm, ms_emb_seq_single):
+        ms_cnn_input_seq = torch.cat([ms_avg_embs_perm, ms_emb_seq_single], dim=2)
+        ms_cnn_input_seq = ms_cnn_input_seq.unsqueeze(2).flatten(0, 1)
+
+        conv_out = self.conv_forward(
+            ms_cnn_input_seq, conv_module=self.conv[0], bn_module=self.conv_bn[0], first_layer=True
+        )
+        for conv_idx in range(1, self.conv_repeat + 1):
+            conv_out = self.conv_forward(
+                conv_input=conv_out,
+                conv_module=self.conv[conv_idx],
+                bn_module=self.conv_bn[conv_idx],
+                first_layer=False,
+            )
+
+        lin_input_seq = conv_out.reshape(
+            self.batch_size,
+            self.length,
+            self.cnn_output_ch * self.emb_dim,
+        )
+        hidden_seq = self.conv_to_linear(lin_input_seq)
+        hidden_seq = self.dropout(F.leaky_relu(hidden_seq))
+        scale_weights = self.softmax(self.linear_to_weights(hidden_seq))
+        scale_weights = scale_weights.unsqueeze(3).expand(-1, -1, -1, self.num_spks)
+        return scale_weights
+
+    MSDD_module.cosine_similarity = cosine_similarity
+    MSDD_module.conv_scale_weights = conv_scale_weights
+    MSDD_module._whisper_diarization_mps_patch = True
+
+
 class MSDDDiarizer:
     def __init__(self, device: Union[str, torch.device]):
+        if str(device) == "mps":
+            # NeMo's MSDD implementation uses Tensor.view() on non-contiguous tensors,
+            # which fails on MPS. reshape() preserves the same semantics here.
+            patch_msdd_module_for_mps()
         self.model: NeuralDiarizer = NeuralDiarizer(cfg=create_config()).to(device)
 
     def diarize(self, audio: torch.Tensor):

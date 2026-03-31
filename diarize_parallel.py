@@ -31,6 +31,7 @@ from helpers import (
     whisper_langs,
     write_srt,
 )
+from runtime_devices import resolve_runtime_devices
 
 
 def diarize_parallel(audio: torch.Tensor, device, queue: mp.Queue):
@@ -42,7 +43,6 @@ def diarize_parallel(audio: torch.Tensor, device, queue: mp.Queue):
 mp.set_start_method("spawn", force=True)
 
 if __name__ == "__main__":
-    mtypes = {"cpu": "int8", "cuda": "float16"}
     pid = os.getpid()
     temp_outputs_dir = f"temp_outputs_{pid}"
     temp_path = os.path.join(os.getcwd(), temp_outputs_dir)
@@ -97,7 +97,8 @@ if __name__ == "__main__":
         "--device",
         dest="device",
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="if you have a GPU use 'cuda', otherwise 'cpu'",
+        choices=["cpu", "cuda", "mps"],
+        help="Choose which device to use: 'cpu', 'cuda', or 'mps'",
     )
 
     parser.add_argument(
@@ -109,13 +110,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     language = process_language_arg(args.language, args.model_name)
+    runtime_devices = resolve_runtime_devices(args.device)
 
     if args.stemming:
         # Isolate vocals from the rest of the audio
 
         return_code = os.system(
             f"python -m demucs.separate -n htdemucs --two-stems=vocals "
-            f'"{args.audio}" -o "{temp_path}" --device "{args.device}"'
+            f'"{args.audio}" -o "{temp_path}" --device "{runtime_devices.demucs_device}"'
         )
 
         if return_code != 0:
@@ -142,7 +144,7 @@ if __name__ == "__main__":
         target=diarize_parallel,
         args=(
             torch.from_numpy(audio_waveform).unsqueeze(0),
-            args.device,
+            runtime_devices.diarizer_device,
             results_queue,
         ),
     )
@@ -150,7 +152,9 @@ if __name__ == "__main__":
     # Transcribe the audio file
 
     whisper_model = faster_whisper.WhisperModel(
-        args.model_name, device=args.device, compute_type=mtypes[args.device]
+        args.model_name,
+        device=runtime_devices.whisper_device,
+        compute_type=runtime_devices.whisper_compute_type,
     )
     whisper_pipeline = faster_whisper.BatchedInferencePipeline(whisper_model)
 
@@ -181,8 +185,8 @@ if __name__ == "__main__":
 
     # Forced Alignment
     alignment_model, alignment_tokenizer = load_alignment_model(
-        args.device,
-        dtype=torch.float16 if args.device == "cuda" else torch.float32,
+        runtime_devices.aligner_device,
+        dtype=runtime_devices.aligner_dtype,
     )
 
     emissions, stride = generate_emissions(

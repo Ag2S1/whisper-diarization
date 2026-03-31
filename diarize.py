@@ -29,8 +29,7 @@ from helpers import (
     whisper_langs,
     write_srt,
 )
-
-mtypes = {"cpu": "int8", "cuda": "float16"}
+from runtime_devices import resolve_runtime_devices
 
 temp_path = os.path.join(os.getcwd(), f"temp_outputs_{os.getpid()}")
 os.makedirs(temp_path, exist_ok=True)
@@ -83,7 +82,8 @@ parser.add_argument(
     "--device",
     dest="device",
     default="cuda" if torch.cuda.is_available() else "cpu",
-    help="if you have a GPU use 'cuda', otherwise 'cpu'",
+    choices=["cpu", "cuda", "mps"],
+    help="Choose which device to use: 'cpu', 'cuda', or 'mps'",
 )
 
 parser.add_argument(
@@ -95,13 +95,14 @@ parser.add_argument(
 
 args = parser.parse_args()
 language = process_language_arg(args.language, args.model_name)
+runtime_devices = resolve_runtime_devices(args.device)
 
 if args.stemming:
     # Isolate vocals from the rest of the audio
 
     return_code = os.system(
         f"python -m demucs.separate -n htdemucs --two-stems=vocals "
-        f'"{args.audio}" -o "{temp_path}" --device "{args.device}"'
+        f'"{args.audio}" -o "{temp_path}" --device "{runtime_devices.demucs_device}"'
     )
 
     if return_code != 0:
@@ -124,7 +125,9 @@ else:
 # Transcribe the audio file
 
 whisper_model = faster_whisper.WhisperModel(
-    args.model_name, device=args.device, compute_type=mtypes[args.device]
+    args.model_name,
+    device=runtime_devices.whisper_device,
+    compute_type=runtime_devices.whisper_compute_type,
 )
 whisper_pipeline = faster_whisper.BatchedInferencePipeline(whisper_model)
 audio_waveform = faster_whisper.decode_audio(vocal_target)
@@ -155,8 +158,8 @@ torch.cuda.empty_cache()
 
 # Forced Alignment
 alignment_model, alignment_tokenizer = load_alignment_model(
-    args.device,
-    dtype=torch.float16 if args.device == "cuda" else torch.float32,
+    runtime_devices.aligner_device,
+    dtype=runtime_devices.aligner_dtype,
 )
 
 emissions, stride = generate_emissions(
@@ -187,12 +190,12 @@ word_timestamps = postprocess_results(text_starred, spans, stride, scores)
 if args.diarizer == "msdd":
     from diarization import MSDDDiarizer
 
-    diarizer_model = MSDDDiarizer(device=args.device)
+    diarizer_model = MSDDDiarizer(device=runtime_devices.diarizer_device)
 
 elif args.diarizer == "sortformer":
     from diarization import SortformerDiarizer
 
-    diarizer_model = SortformerDiarizer(device=args.device)
+    diarizer_model = SortformerDiarizer(device=runtime_devices.diarizer_device)
 
 speaker_ts = diarizer_model.diarize(torch.from_numpy(audio_waveform).unsqueeze(0))
 del diarizer_model
